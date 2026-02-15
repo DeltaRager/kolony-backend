@@ -7,6 +7,7 @@ const configSchema = z.object({
   NODE_ENV: z.string().default('development'),
   PORT: z.coerce.number().default(4000),
   FRONTEND_ORIGIN: z.string().default('http://localhost:3000'),
+  BACKEND_BASE_URL: z.string().default('http://localhost:4000'),
   SUPABASE_URL: z.string().url(),
   SUPABASE_SECRET_KEY: z.string().optional(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().optional(),

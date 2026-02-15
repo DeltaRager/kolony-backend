@@ -13,6 +13,7 @@ This schema supports the MVP command center workflow:
 - `agents`: registered agents and runtime status metadata.
   - static-token auth columns: `token_hash`, `token_hint`, `token_active`
 - `commands`: command requests and lifecycle state.
+  - claim/lease columns: `claimed_by_agent_id`, `claimed_at`, `lease_expires_at`, `attempt_count`, `last_claim_error`
 - `command_results`: streamed/final command output records.
 - `events`: agent/command activity timeline.
 
@@ -47,3 +48,4 @@ erDiagram
 ## Migration File
 - `supabase/migrations/20260215161000_initial_schema.sql`
 - `supabase/migrations/20260215170000_agent_static_tokens.sql`
+- `supabase/migrations/20260215221000_command_claim_leases.sql`

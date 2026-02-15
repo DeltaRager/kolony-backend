@@ -11,6 +11,7 @@ type StreamPayload = {
   isFinal?: boolean;
   eventType: string;
   timestamp: string;
+  data?: Record<string, unknown>;
 };
 
 class RealtimeHub {

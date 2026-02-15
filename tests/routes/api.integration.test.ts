@@ -169,6 +169,53 @@ const mockState = vi.hoisted(() => {
     supabaseAdmin: {
       from(table: string) {
         return new QueryBuilder(table);
+      },
+      async rpc(fn: string, params: Record<string, unknown>) {
+        if (fn !== 'claim_agent_commands') {
+          return { data: null, error: { message: `Unsupported rpc ${fn}` } };
+        }
+
+        const agentId = params.p_agent_id as string | undefined;
+        const maxClaims = Math.min(Math.max(Number(params.p_max_claims ?? 1), 1), 10);
+        const leaseSeconds = Math.min(Math.max(Number(params.p_lease_seconds ?? 60), 15), 300);
+        if (!agentId) {
+          return { data: null, error: { message: 'Missing p_agent_id' } };
+        }
+
+        const commands = db.commands ?? [];
+        const now = Date.now();
+        const claimable = commands
+          .filter((row) => {
+            const status = row.status;
+            const commandAgentId = row.agent_id;
+            const leaseExpiresAt = row.lease_expires_at;
+            const leaseMs =
+              typeof leaseExpiresAt === 'string' ? new Date(leaseExpiresAt).getTime() : Number.NEGATIVE_INFINITY;
+            const leaseExpired = !Number.isFinite(leaseMs) || leaseMs <= now;
+            return commandAgentId === agentId && status === 'queued' && leaseExpired;
+          })
+          .sort((a, b) => {
+            const leftPriority = Number(a.priority ?? 0);
+            const rightPriority = Number(b.priority ?? 0);
+            if (leftPriority !== rightPriority) return rightPriority - leftPriority;
+            const leftCreated = typeof a.created_at === 'string' ? a.created_at : '';
+            const rightCreated = typeof b.created_at === 'string' ? b.created_at : '';
+            return leftCreated.localeCompare(rightCreated);
+          })
+          .slice(0, maxClaims);
+
+        const leaseExpiresAt = new Date(now + leaseSeconds * 1000).toISOString();
+        const claimed = claimable.map((row) => {
+          row.status = 'dispatching';
+          row.claimed_by_agent_id = agentId;
+          row.claimed_at = new Date(now).toISOString();
+          row.lease_expires_at = leaseExpiresAt;
+          row.attempt_count = Number(row.attempt_count ?? 0) + 1;
+          row.updated_at = new Date(now).toISOString();
+          return clone(row);
+        });
+
+        return { data: claimed, error: null };
       }
     },
     supabaseAuthClient: {
@@ -239,7 +286,8 @@ function seedDatabase() {
         status: 'queued',
         requested_by: USER_OPERATOR_ID,
         priority: 5,
-        payload: {}
+        payload: {},
+        created_at: '2026-02-15T00:00:00.000Z'
       },
       {
         id: COMMAND_COMPLETED_ID,
@@ -248,7 +296,8 @@ function seedDatabase() {
         status: 'completed',
         requested_by: USER_OPERATOR_ID,
         priority: 5,
-        payload: {}
+        payload: {},
+        created_at: '2026-02-15T00:05:00.000Z'
       }
     ],
     command_results: [],
@@ -453,5 +502,78 @@ describe('API integration', () => {
 
     closeEmitter.emit('close');
     expect(res.end).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows agent to claim queued commands', async () => {
+    const res = await dispatch(mcpRouter, {
+      method: 'POST',
+      path: '/commands/claim',
+      body: { maxClaims: 1, leaseSeconds: 60 },
+      headers: { authorization: `Bearer ${AGENT_A_TOKEN}` }
+    });
+
+    expect(res.statusCode).toBe(200);
+    const items = (res.body as { data: { items: Array<{ id: string; status: string }> } }).data.items;
+    expect(items).toHaveLength(1);
+    expect(items[0].id).toBe(COMMAND_QUEUED_ID);
+    expect(items[0].status).toBe('dispatching');
+
+    const db = mockState.getDb();
+    const updated = (db.commands ?? []).find((row) => row.id === COMMAND_QUEUED_ID);
+    expect(updated?.claimed_by_agent_id).toBe(AGENT_A_ID);
+    expect(updated?.status).toBe('dispatching');
+  });
+
+  it('extends lease only for current claiming agent', async () => {
+    await dispatch(mcpRouter, {
+      method: 'POST',
+      path: '/commands/claim',
+      body: { maxClaims: 1, leaseSeconds: 60 },
+      headers: { authorization: `Bearer ${AGENT_A_TOKEN}` }
+    });
+
+    const forbidden = await dispatch(mcpRouter, {
+      method: 'POST',
+      path: `/commands/${COMMAND_QUEUED_ID}/lease/extend`,
+      params: { id: COMMAND_QUEUED_ID },
+      body: { leaseSeconds: 120 },
+      headers: { authorization: `Bearer ${AGENT_B_TOKEN}` }
+    });
+    expect(forbidden.statusCode).toBe(403);
+
+    const allowed = await dispatch(mcpRouter, {
+      method: 'POST',
+      path: `/commands/${COMMAND_QUEUED_ID}/lease/extend`,
+      params: { id: COMMAND_QUEUED_ID },
+      body: { leaseSeconds: 120 },
+      headers: { authorization: `Bearer ${AGENT_A_TOKEN}` }
+    });
+    expect(allowed.statusCode).toBe(200);
+    expect((allowed.body as { data: { id: string } }).data.id).toBe(COMMAND_QUEUED_ID);
+  });
+
+  it('releases claimed command back to queue', async () => {
+    await dispatch(mcpRouter, {
+      method: 'POST',
+      path: '/commands/claim',
+      body: { maxClaims: 1, leaseSeconds: 60 },
+      headers: { authorization: `Bearer ${AGENT_A_TOKEN}` }
+    });
+
+    const res = await dispatch(mcpRouter, {
+      method: 'POST',
+      path: `/commands/${COMMAND_QUEUED_ID}/release`,
+      params: { id: COMMAND_QUEUED_ID },
+      body: { reason: 'worker shutting down' },
+      headers: { authorization: `Bearer ${AGENT_A_TOKEN}` }
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect((res.body as { data: { status: string } }).data.status).toBe('queued');
+
+    const db = mockState.getDb();
+    const released = (db.commands ?? []).find((row) => row.id === COMMAND_QUEUED_ID);
+    expect(released?.status).toBe('queued');
+    expect(released?.claimed_by_agent_id ?? null).toBeNull();
   });
 });

@@ -11,8 +11,12 @@ export type AuthenticatedRequest = Request & {
 export async function requireUser(request: AuthenticatedRequest, response: Response, next: NextFunction) {
   const authHeader = request.header('authorization');
   const headerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice('Bearer '.length) : null;
-  const queryToken =
-    typeof request.query.access_token === 'string' ? request.query.access_token : null;
+  const allowQueryToken = request.method === 'GET'
+    && (/^\/commands\/[^/]+\/stream$/.test(request.path)
+      || /^\/agents\/[^/]+\/code\/sessions\/[^/]+\/stream$/.test(request.path));
+  const queryToken = allowQueryToken && typeof request.query.access_token === 'string'
+    ? request.query.access_token
+    : null;
   const token = headerToken ?? queryToken;
   if (!token) return response.status(401).json({ error: 'Missing bearer token' });
 

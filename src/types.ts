@@ -10,3 +10,5 @@ export type CommandStatus =
   | 'cancelled';
 
 export type AgentStatus = 'online' | 'offline' | 'busy' | 'error';
+
+export type AgentTaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
